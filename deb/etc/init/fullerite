@@ -16,7 +16,6 @@ fi
 
 sudo -u "$USER" /usr/bin/fullerite \
   --config "$CONFIG_FILE" \
-  --log_file "$LOG_FILE" \
-  --log_level "$LOG_LEVEL" 2>&1 | \
+  --log_level "$LOG_LEVEL" 2>&1 >>"$LOG_FILE" | \
   sudo -u "$USER" tee --append "$ERR_LOG_FILE"
 end script

@@ -35,7 +35,7 @@ func initLogrus(ctx *cli.Context) {
 	}
 
 	filename := ctx.String("log_file")
-	logrus.SetOutput(os.Stderr)
+	logrus.SetOutput(os.Stdout)
 	if filename != "" {
 		var f *os.File
 		_, err := os.Stat(filename)
@@ -45,7 +45,7 @@ func initLogrus(ctx *cli.Context) {
 		f, err = os.Create(filename)
 		if err != nil {
 			log.Error("Cannot create log file ", err)
-			log.Warning("Continuing to log to stderr")
+			log.Warning("Continuing to log to stdout")
 		} else {
 			logrus.SetOutput(f)
 		}
