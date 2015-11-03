@@ -111,6 +111,7 @@ func start(ctx *cli.Context) {
 	for metric := range metrics {
 		// Writing to handlers' channels. Sending metrics is
 		// handled asynchronously in handlers' Run functions.
+		//log.Info(metric)
 		writeToHandlers(handlers, metric)
 	}
 }

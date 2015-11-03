@@ -46,6 +46,8 @@ func New(name string) Collector {
 		collector = newFulleriteHTTPCollector(channel, DefaultCollectionInterval, collectorLog)
 	case "NerveUWSGI":
 		collector = newNerveUWSGICollector(channel, DefaultCollectionInterval, collectorLog)
+	case "DockerStats":
+		collector = NewDockerStats(channel, DefaultCollectionInterval, collectorLog)
 	default:
 		defaultLog.Error("Cannot create collector", name)
 		return nil

@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	defaultPort        = 19090
+	defaultPort        = 19093
 	defaultMetricsPath = "/metrics"
 )
 
