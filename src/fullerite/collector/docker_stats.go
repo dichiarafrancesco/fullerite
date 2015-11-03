@@ -52,8 +52,16 @@ func (d *DockerStats) Configure(configMap map[string]interface{}) {
 
 // Collect method
 func (d DockerStats) Collect() {
-	client, _ := docker.NewClient(endpoint)
-	containerArray, _ := client.ListContainers(docker.ListContainersOptions{All: false})
+	client, err := docker.NewClient(endpoint)
+	if err != nil {
+		d.log.Error(err)
+		return
+	}
+	containerArray, err := client.ListContainers(docker.ListContainersOptions{All: false})
+	if err != nil {
+		d.log.Error(err)
+		return
+	}
 	results := make(chan int, len(containerArray))
 	for _, APIContainer := range containerArray {
 		container, err := client.InspectContainer(APIContainer.ID)
@@ -88,7 +96,7 @@ func (d DockerStats) GetDockerContainerInfo(container *docker.Container, client 
 			errC <- nil
 			break
 		}
-                errC <- nil
+		errC <- nil
 
 		done <- false
 
@@ -102,10 +110,10 @@ func (d DockerStats) GetDockerContainerInfo(container *docker.Container, client 
 			if !flag {
 				select {
 				case _, s := <-done:
-                                        if !s {
-                                            flag = true
-                                            break
-                                        }
+					if !s {
+						flag = true
+						break
+					}
 					break
 				case <-time.After(time.Second * 1):
 					flag = true
