@@ -3,31 +3,32 @@ package collector
 import (
 	"fullerite/metric"
 
-	l "github.com/Sirupsen/logrus"
-
-	//"fmt"
-
 	"strings"
 
-	"github.com/fsouza/go-dockerclient"
-
 	"time"
+
+	l "github.com/Sirupsen/logrus"
+
+	"github.com/fsouza/go-dockerclient"
 )
 
 const (
-	mesosTaskID       = "MESOS_TASK_ID"
-	defaultDockerPath = "/sys/fs/cgroup/memory/sysdefault/docker/"
-	endpoint          = "unix:///var/run/docker.sock"
-	timeoutChannel    = 3
+	mesosTaskID    = "MESOS_TASK_ID"
+	endpoint       = "unix:///var/run/docker.sock"
+	timeoutChannel = 7
 )
 
-// DockerStats collector type
+// DockerStats collector type.
+// previousCPUValues contains the last cpu-usage values per container.
+// dockerClient is the client for the Docker remote API.
 type DockerStats struct {
 	baseCollector
 	previousCPUValues map[string]*CPUValues
+	dockerClient      *docker.Client
 }
 
-// CPUValues struct
+// CPUValues struct contains the last cpu-usage values in order to compute properly the current values.
+// (see calculateCPUPercent() for more details)
 type CPUValues struct {
 	totCPU, systemCPU float64
 }
@@ -41,38 +42,37 @@ func NewDockerStats(channel chan metric.Metric, initialInterval int, log *l.Entr
 	d.interval = initialInterval
 	d.name = "DockerStats"
 	d.previousCPUValues = make(map[string]*CPUValues)
+	d.dockerClient, _ = docker.NewClient(endpoint)
 
 	return d
 }
 
-// Configure this takes a dictionary of values with which the handler can configure itself
+// Configure takes a dictionary of values with which the handler can configure itself.
 func (d *DockerStats) Configure(configMap map[string]interface{}) {
 	d.configureCommonParams(configMap)
 }
 
-// Collect method
+// Collect iterates on all the docker containers alive and, if possible, collects the correspondent
+// memory and cpu statistics.
+// For each container a gorutine is started to spin up the collection process.
 func (d DockerStats) Collect() {
-	client, err := docker.NewClient(endpoint)
+	containerArray, err := d.dockerClient.ListContainers(docker.ListContainersOptions{All: false})
 	if err != nil {
-		d.log.Error(err)
-		return
-	}
-	containerArray, err := client.ListContainers(docker.ListContainersOptions{All: false})
-	if err != nil {
-		d.log.Error(err)
+		d.log.Error("Impossible reach the docker client", err)
 		return
 	}
 	results := make(chan int, len(containerArray))
 	for _, APIContainer := range containerArray {
-		container, err := client.InspectContainer(APIContainer.ID)
+		container, err := d.dockerClient.InspectContainer(APIContainer.ID)
 		if err != nil {
+			d.log.Error("Not possible inspect container", err)
 			results <- 0
 			continue
 		}
 		if _, ok := d.previousCPUValues[container.ID]; !ok {
 			d.previousCPUValues[container.ID] = new(CPUValues)
 		}
-		go d.GetDockerContainerInfo(container, client, results)
+		go d.GetDockerContainerInfo(container, results)
 	}
 	for i := 0; i < len(containerArray); i++ {
 		<-results
@@ -80,24 +80,30 @@ func (d DockerStats) Collect() {
 	close(results)
 }
 
-// GetDockerContainerInfo method
-func (d DockerStats) GetDockerContainerInfo(container *docker.Container, client *docker.Client, results chan<- int) {
+// GetDockerContainerInfo gets container statistics for the given container.
+// results is a channel to make possible the synchronization between the main process and the gorutines (wait-notify pattern).
+func (d DockerStats) GetDockerContainerInfo(container *docker.Container, results chan<- int) {
 	errC := make(chan error, 1)
 	statsC := make(chan *docker.Stats, 1)
 	done := make(chan bool)
 
 	go func() {
-		errC <- client.Stats(docker.StatsOptions{container.ID, statsC, true, done, time.Second * 5})
-		//	close(errC)
+		errC <- d.dockerClient.Stats(docker.StatsOptions{container.ID, statsC, false, done, time.Second * 8})
 	}()
 	select {
 	case stats, ok := <-statsC:
 		if !ok {
+			select {
+			case err := <-errC:
+				d.log.Error("Received error from stream channel", err)
+				break
+			case <-time.After(time.Millisecond * 500):
+				break
+			}
 			errC <- nil
 			break
 		}
 		errC <- nil
-
 		done <- false
 
 		d.BuildMetrics(container, float64(stats.MemoryStats.Usage), float64(stats.MemoryStats.Limit), calculateCPUPercent(d.previousCPUValues[container.ID].totCPU, d.previousCPUValues[container.ID].systemCPU, stats))
@@ -105,41 +111,18 @@ func (d DockerStats) GetDockerContainerInfo(container *docker.Container, client 
 		d.previousCPUValues[container.ID].totCPU = float64(stats.CPUStats.CPUUsage.TotalUsage)
 		d.previousCPUValues[container.ID].systemCPU = float64(stats.CPUStats.SystemCPUUsage)
 
-		flag := false
-		for {
-			if !flag {
-				select {
-				case _, s := <-done:
-					if !s {
-						flag = true
-						break
-					}
-					break
-				case <-time.After(time.Second * 1):
-					flag = true
-					break
-				}
-			} else {
-				break
-			}
-		}
-		//errC <- nil
 		break
 	case <-time.After(time.Second * timeoutChannel):
+		d.log.Error("Impossible sending metric. Timeout expired for the container", container.ID)
+		done <- false
 		errC <- nil
 		break
 	}
-	_ = <-errC
-	//close(done)
-
-	//err := <-errC
-	//if err != nil {
-	//	fmt.Println(err)
-	//}
+	<-errC
 	results <- 0
 }
 
-// BuildMetrics method
+// BuildMetrics creates the actual metrics for the given container.
 func (d DockerStats) BuildMetrics(container *docker.Container, memUsed, memLimit, cpuPercentage float64) {
 	ret := []metric.Metric{
 		buildDockerMetric("DockerMemoryUsed", memUsed),
@@ -157,13 +140,15 @@ func (d DockerStats) BuildMetrics(container *docker.Container, memUsed, memLimit
 	d.SendMetrics(ret)
 }
 
-// SendMetrics method
+// SendMetrics writes all the metrics received to the collector channel.
 func (d DockerStats) SendMetrics(metrics []metric.Metric) {
 	for _, m := range metrics {
 		d.Channel() <- m
 	}
 }
 
+// Function that extracts the service and instance name from mesos id in order to add them as dimensions
+// in these metrics.
 func getServiceDimensions(container *docker.Container) map[string]string {
 	envVars := container.Config.Env
 
@@ -192,6 +177,7 @@ func buildDockerMetric(name string, value float64) (m metric.Metric) {
 	return m
 }
 
+// Function that compute the current cpu usage percentage combining current and last values.
 func calculateCPUPercent(previousCPU, previousSystem float64, stats *docker.Stats) float64 {
 	var (
 		cpuPercent = 0.0
